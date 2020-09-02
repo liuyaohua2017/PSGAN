@@ -21,12 +21,13 @@ _C.LOG.LOG_PATH = 'log/'
 _C.LOG.SNAPSHOT_PATH = 'snapshot/'
 _C.LOG.VIS_PATH = 'visulization/'
 _C.LOG.SNAPSHOT_STEP = 1024
-_C.LOG.LOG_STEP = 8
+_C.LOG.LOG_STEP = 1
 _C.LOG.VIS_STEP = 2048
 
 # Data settings
 _C.DATA = CfgNode()
 _C.DATA.PATH = './data'
+_C.DATA.PATH = 'D:/DLdata/MT-Dataset'
 _C.DATA.NUM_WORKERS = 4
 _C.DATA.BATCH_SIZE = 1
 _C.DATA.IMG_SIZE = 256
@@ -79,6 +80,7 @@ _C.PREPROCESS.LANDMARK_POINTS = 68
 # Postprocessing
 _C.POSTPROCESS = CfgNode()
 _C.POSTPROCESS.WILL_DENOISE = False
+_C.device='cpu'
 
 
 def get_config()->CfgNode:
