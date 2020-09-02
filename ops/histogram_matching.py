@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import copy
+from psgan.config import get_config
 
 def cal_hist(image):
     """
@@ -62,5 +63,11 @@ def histogram_matching(dstImg, refImg, index):
     for i in range(0, 3):
         dstImg[i, index[0], index[1]] = dst_align[i]
 
-    dstImg = torch.FloatTensor(dstImg).cuda()
+    config = get_config()
+    device = config.device
+    if device == 'cuda':
+        dstImg = torch.FloatTensor(dstImg).cuda()
+    else:
+        dstImg = torch.FloatTensor(dstImg)
+
     return dstImg

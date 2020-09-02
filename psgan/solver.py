@@ -38,7 +38,10 @@ class Solver(Track):
         self.snapshot_path = os.path.join(self.log_path, config.LOG.SNAPSHOT_PATH)
         self.log_step = config.LOG.LOG_STEP
         self.vis_step = config.LOG.VIS_STEP
-        self.snapshot_step = config.LOG.SNAPSHOT_STEP // torch.cuda.device_count()
+        if device=='cuda':
+            self.snapshot_step = config.LOG.SNAPSHOT_STEP // torch.cuda.device_count()
+        else:
+            self.snapshot_step = config.LOG.SNAPSHOT_STEP // 1
 
         # Data loader
         self.data_loader_train = data_loader
@@ -93,22 +96,32 @@ class Solver(Track):
 
     def build_model(self):
         # self.G = net.Generator()
+        # 构建两个判别器（二分类器） D_X, D_Y
         self.D_A = net.Discriminator(self.img_size, self.d_conv_dim, self.d_repeat_num, self.norm)
         self.D_B = net.Discriminator(self.img_size, self.d_conv_dim, self.d_repeat_num, self.norm)
 
+        # 初始化网络参数，apply为从nn.module继承
         self.G.apply(self.weights_init_xavier)
         self.D_A.apply(self.weights_init_xavier)
         self.D_B.apply(self.weights_init_xavier)
 
+        # 从checkpoint文件中加载网络参数
         self.load_checkpoint()
+
+        # 循环一致性损失Cycle consistency loss
         self.criterionL1 = torch.nn.L1Loss()
+        # 感知损失Perceptual loss
         self.criterionL2 = torch.nn.MSELoss()
-        self.criterionGAN = GANLoss(use_lsgan=True, tensor=torch.cuda.FloatTensor)
+        if self.device=='cuda':
+            self.criterionGAN = GANLoss(use_lsgan=True, tensor=torch.cuda.FloatTensor)
+        else:
+            self.criterionGAN = GANLoss(use_lsgan=True, tensor=torch.FloatTensor)
 
         self.vgg = net.vgg16(pretrained=True)
+        # 妆容损失makeup loss
         self.criterionHis = HistogramLoss()
 
-        # Optimizers
+        # Optimizers 优化器，迭代优化生成器和判别器的参数
         self.g_optimizer = torch.optim.Adam(self.G.parameters(), self.g_lr, [self.beta1, self.beta2])
         self.d_A_optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.D_A.parameters()), self.d_lr, [self.beta1, self.beta2])
         self.d_B_optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.D_B.parameters()), self.d_lr, [self.beta1, self.beta2])
@@ -143,16 +156,16 @@ class Solver(Track):
     def load_checkpoint(self):
         G_path = os.path.join(self.checkpoint, 'G.pth')
         if os.path.exists(G_path):
-            self.G.load_state_dict(torch.load(G_path))
+            self.G.load_state_dict(torch.load(G_path, map_location=torch.device(self.device)))
             print('loaded trained generator {}..!'.format(G_path))
         D_A_path = os.path.join(self.checkpoint, 'D_A.pth')
         if os.path.exists(D_A_path):
-            self.D_A.load_state_dict(torch.load(D_A_path))
+            self.D_A.load_state_dict(torch.load(D_A_path, map_location=torch.device(self.device)))
             print('loaded trained discriminator A {}..!'.format(D_A_path))
 
         D_B_path = os.path.join(self.checkpoint, 'D_B.pth')
         if os.path.exists(D_B_path):
-            self.D_B.load_state_dict(torch.load(D_B_path))
+            self.D_B.load_state_dict(torch.load(D_B_path, map_location=torch.device(self.device)))
             print('loaded trained discriminator B {}..!'.format(D_B_path))
 
     def generate(self, org_A, ref_B, lms_A=None, lms_B=None, mask_A=None, mask_B=None, 
@@ -187,8 +200,8 @@ class Solver(Track):
         d_lr = self.d_lr
         start = 0
 
-        for self.e in range(start, self.num_epochs):
-            for self.i, (source_input, reference_input) in enumerate(self.data_loader_train):
+        for self.e in range(start, self.num_epochs): # epoch
+            for self.i, (source_input, reference_input) in enumerate(self.data_loader_train): # batch
                 # image, mask, dist
                 image_s, image_r = source_input[0].to(self.device), reference_input[0].to(self.device)
                 mask_s, mask_r = source_input[1].to(self.device), reference_input[1].to(self.device) 
@@ -196,15 +209,17 @@ class Solver(Track):
                 self.track("data")
 
                 # ================== Train D ================== #
-                # training D_A, D_A aims to distinguish class B
+                # training D_A, D_A aims to distinguish class B  判断是否是“真reference” y
                 # Real
                 out = self.D_A(image_r)
                 self.track("D_A")
                 d_loss_real = self.criterionGAN(out, True)
                 self.track("D_A_loss")
                 # Fake
+                # 利用生成网络生成fake_y
                 fake_A = self.G(image_s, image_r, mask_s, mask_r, dist_s, dist_r)
                 self.track("G")
+                # 判别网络的输入，判别网络的损失 requires_grad=False
                 fake_A = Variable(fake_A.data).detach()
                 out = self.D_A(fake_A)
                 self.track("D_A_2")
@@ -212,20 +227,21 @@ class Solver(Track):
                 self.track("D_A_loss_2")
 
                 # Backward + Optimize
+                # 判别器网络反向传播，更新网络参数
                 d_loss = (d_loss_real.mean() + d_loss_fake.mean()) * 0.5
                 self.d_A_optimizer.zero_grad()
-                d_loss.backward(retain_graph=False)
+                d_loss.backward(retain_graph=False) ##retain_graph=False 释放计算图
                 self.d_A_optimizer.step()
 
                 # Logging
                 self.loss = {}
                 self.loss['D-A-loss_real'] = d_loss_real.mean().item()
 
-                # training D_B, D_B aims to distinguish class A
+                # training D_B, D_B aims to distinguish class A 判断是否是“真source” x
                 # Real
                 out = self.D_B(image_s)
                 d_loss_real = self.criterionGAN(out, True)
-                # Fake
+                # Fake 利用生成网络生成fake_x
                 self.track("G-before")
                 fake_B = self.G(image_r, image_s, mask_r, mask_s, dist_r, dist_s)
                 self.track("G-2")
@@ -260,7 +276,7 @@ class Solver(Track):
                     # self.track("Identical")
 
                     # GAN loss D_A(G_A(A))
-                    # fake_A in class B, 
+                    # fake_A in class B,  # 生成器对抗损失 L_G^adv
                     fake_A = self.G(image_s, image_r, mask_s, mask_r, dist_s, dist_r)
                     pred_fake = self.D_A(fake_A)
                     g_A_loss_adv = self.criterionGAN(pred_fake, True)
@@ -273,6 +289,7 @@ class Solver(Track):
                     # self.track("Generator forward")
 
                     # color_histogram loss
+                    # 各局部颜色直方图损失  Makeup loss
                     g_A_loss_his = 0
                     g_B_loss_his = 0
                     g_A_lip_loss_his = self.criterionHis(
@@ -305,6 +322,7 @@ class Solver(Track):
                     # self.track("Generator histogram")
 
                     # cycle loss
+                    # fake_A: fake_x/source
                     rec_A = self.G(fake_A, image_s, mask_s, mask_s, dist_s, dist_s)
                     rec_B = self.G(fake_B, image_r, mask_r, mask_r, dist_r, dist_r)
 
@@ -313,6 +331,7 @@ class Solver(Track):
                     # self.track("Generator recover")
 
                     # vgg loss
+                    # Perceptual loss
                     vgg_s = self.vgg(image_s)
                     vgg_s = Variable(vgg_s.data).detach()
                     vgg_fake_A = self.vgg(fake_A)
@@ -431,3 +450,6 @@ class Solver(Track):
             return Variable(x, requires_grad=requires_grad)
         else:
             return Variable(x)
+
+
+
